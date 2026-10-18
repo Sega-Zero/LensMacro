@@ -33,7 +33,15 @@
 ///                 return copy
 ///             }
 ///         )
-///         // ... one entry per stored `var` property
+///         // ... one entry per stored property: `let` entries rebuild the
+///         // value through the memberwise initializer instead of copying it
+///     }
+///
+///     func changing(name: String? = nil, address: Address? = nil) -> Person {
+///         Person(
+///             name: name ?? self.name,
+///             address: address ?? self.address
+///         )
 ///     }
 ///
 ///     @dynamicMemberLookup
@@ -66,29 +74,32 @@
 /// }
 /// ```
 ///
-/// Only stored `var` properties with an explicit type annotation are
-/// included in `Lenses` and chain through key paths: computed properties,
-/// static members, and properties with property wrappers are skipped for
-/// lenses.
+/// Every stored property with an explicit type annotation gets an entry in
+/// `Lenses`: `var` entries replace the field in a copy of the value, while
+/// `let` entries rebuild the value through the memberwise initializer.
+/// Computed properties, static members, and properties with property
+/// wrappers are skipped for lenses.
 ///
-/// Stored `let` properties get rebuild-based bound lenses on the generated
-/// `ThroughLens` wrapper (key paths are not writable for constants), so
-/// `snapshot.throughLens.version.set(2)` works like any other chain.
+/// Dot-notation chains only go through `var` properties (key paths are not
+/// writable for constants), so stored `let` properties also get dedicated
+/// rebuild-based bound lenses on the generated `ThroughLens` wrapper —
+/// `snapshot.throughLens.version.set(2)` works like any other chain — and
+/// their `Lenses` entries compose like any other lens.
 ///
-/// `changing` is different: it rebuilds the value through the memberwise
-/// initializer, so it can replace every stored property — including `let`
-/// ones — in one call. Passing `nil` (or omitting a parameter) keeps the
-/// current value; an optional property cannot be set back to `nil` this
-/// way.
+/// `changing` is generated both on the value itself and on `throughLens`.
+/// It rebuilds through the memberwise initializer, so it can replace every
+/// stored property — including `let` ones — in one call. Passing `nil` (or
+/// omitting a parameter) keeps the current value; an optional property
+/// cannot be set back to `nil` this way (a rebuild-based `let` lens can).
 ///
-/// `changing` is not generated for structs with custom initializers or
-/// structs whose properties have property wrappers, because the memberwise
-/// initializer it builds on is not available in those cases. Such structs
-/// keep a plain `throughLens` property and `let` properties cannot be
-/// chained.
+/// `changing` and the rebuild-based `let` lenses are not generated for
+/// structs with custom initializers or structs whose properties have
+/// property wrappers, because the memberwise initializer they build on is
+/// not available in those cases. Such structs keep a plain `throughLens`
+/// property and `let` properties cannot be chained.
 ///
 /// Generic structs get computed lenses (`static var`) instead of stored
 /// ones, because Swift does not allow static stored properties in generic
 /// types.
-@attached(member, names: named(Lenses), named(throughLens), named(ThroughLens))
+@attached(member, names: named(Lenses), named(throughLens), named(ThroughLens), named(changing))
 public macro Lens() = #externalMacro(module: "LensMacros", type: "LensMacro")

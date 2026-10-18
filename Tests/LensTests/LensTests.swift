@@ -40,6 +40,24 @@ struct Warehouse {
     }
 }
 
+@Lens
+struct Receipt {
+    let memo: String?
+    var total: Int
+}
+
+@Lens
+struct Payload {
+    let kind: String
+    var size: Int
+}
+
+@Lens
+struct Envelope {
+    let payload: Payload
+    var id: Int
+}
+
 final class LensTests: XCTestCase {
     let author = Person(
         name: "Maciej Konieczny",
@@ -207,5 +225,51 @@ final class LensTests: XCTestCase {
         XCTAssertEqual(changed.weight, 100)
 
         XCTAssertEqual(crate.throughLens.weight.get(), 42)
+    }
+
+    func testChangingOnValue() {
+        let changed = author.changing(name: "narf")
+        XCTAssertEqual(changed.name, "narf")
+        XCTAssertEqual(changed.address.street, "Sesame Street")
+
+        // The original value is untouched.
+        XCTAssertEqual(author.name, "Maciej Konieczny")
+
+        let snapshot = Snapshot(version: 1, title: "hello", isDraft: false, note: nil)
+        XCTAssertEqual(snapshot.changing(version: 2, isDraft: true).version, 2)
+        XCTAssertEqual(snapshot.changing(title: "goodbye").title, "goodbye")
+
+        let envelope = Envelope(payload: Payload(kind: "text", size: 1), id: 7)
+        XCTAssertEqual(envelope.changing(id: 8).id, 8)
+    }
+
+    func testLetLensCanSetOptionalToNil() {
+        let receipt = Receipt(memo: "hi", total: 10)
+
+        let cleared = Receipt.Lenses.memo.set(nil, receipt)
+        XCTAssertEqual(cleared.memo, nil)
+        XCTAssertEqual(cleared.total, 10)
+
+        let cleared2 = receipt.throughLens.memo.set(nil)
+        XCTAssertEqual(cleared2.memo, nil)
+        XCTAssertEqual(cleared2.total, 10)
+    }
+
+    func testLetLensesCompose() {
+        let envelope = Envelope(payload: Payload(kind: "text", size: 1), id: 7)
+
+        let kind = Envelope.Lenses.payload.compose(Payload.Lenses.kind)
+        XCTAssertEqual(kind.get(envelope), "text")
+
+        let renamed = kind.set("image", envelope)
+        XCTAssertEqual(renamed.payload.kind, "image")
+        XCTAssertEqual(renamed.payload.size, 1)
+        XCTAssertEqual(renamed.id, 7)
+
+        // The original value is untouched.
+        XCTAssertEqual(envelope.payload.kind, "text")
+
+        let size = Envelope.Lenses.payload.compose(Payload.Lenses.size)
+        XCTAssertEqual(size.set(42, envelope).payload.size, 42)
     }
 }

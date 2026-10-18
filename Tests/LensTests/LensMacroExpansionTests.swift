@@ -48,6 +48,13 @@ final class LensMacroExpansionTests: XCTestCase {
                     )
                 }
 
+                func changing(name: String? = nil, age: Int? = nil) -> User {
+                    User(
+                        name: name ?? self.name,
+                        age: age ?? self.age
+                    )
+                }
+
                 @dynamicMemberLookup
                 struct ThroughLens {
                     let instance: User
@@ -81,7 +88,7 @@ final class LensMacroExpansionTests: XCTestCase {
         )
     }
 
-    func testSkipsLetComputedAndStaticProperties() throws {
+    func testSkipsComputedAndStaticProperties() throws {
         assertMacroExpansion(
             """
             @Lens
@@ -100,6 +107,17 @@ final class LensMacroExpansionTests: XCTestCase {
                 static var count: Int = 0
 
                 enum Lenses {
+                    static let id: LensType.LensValue<User, Int> = LensType.LensValue(
+                        get: {
+                            $0.id
+                        },
+                        set: { (newValue, whole) in
+                            User(
+                                id: newValue,
+                                name: whole.name
+                            )
+                        }
+                    )
                     static let name: LensType.LensValue<User, String> = LensType.LensValue(
                         get: {
                             $0.name
@@ -109,6 +127,13 @@ final class LensMacroExpansionTests: XCTestCase {
                             copy.name = newValue
                             return copy
                         }
+                    )
+                }
+
+                func changing(id: Int? = nil, name: String? = nil) -> User {
+                    User(
+                        id: id ?? self.id,
+                        name: name ?? self.name
                     )
                 }
 
@@ -129,14 +154,7 @@ final class LensMacroExpansionTests: XCTestCase {
                     }
 
                     var id: LensType.BoundLensValue<User, Int> {
-                        LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(
-                            get: {
-                                $0.id
-                            },
-                            set: { (newValue, whole) in
-                                whole.throughLens.changing(id: newValue)
-                            }
-                        ))
+                        LensType.BoundLensValue(instance: instance, lens: Lenses.id)
                     }
 
                     func changing(id: Int? = nil, name: String? = nil) -> User {
@@ -173,6 +191,30 @@ final class LensMacroExpansionTests: XCTestCase {
                 public var isDraft: Bool
 
                 public enum Lenses {
+                    public static let version: LensType.LensValue<Snapshot, Int> = LensType.LensValue(
+                        get: {
+                            $0.version
+                        },
+                        set: { (newValue, whole) in
+                            Snapshot(
+                                version: newValue,
+                                title: whole.title,
+                                isDraft: whole.isDraft
+                            )
+                        }
+                    )
+                    public static let title: LensType.LensValue<Snapshot, String?> = LensType.LensValue(
+                        get: {
+                            $0.title
+                        },
+                        set: { (newValue, whole) in
+                            Snapshot(
+                                version: whole.version,
+                                title: newValue,
+                                isDraft: whole.isDraft
+                            )
+                        }
+                    )
                     public static let isDraft: LensType.LensValue<Snapshot, Bool> = LensType.LensValue(
                         get: {
                             $0.isDraft
@@ -182,6 +224,14 @@ final class LensMacroExpansionTests: XCTestCase {
                             copy.isDraft = newValue
                             return copy
                         }
+                    )
+                }
+
+                public func changing(version: Int? = nil, title: String? = nil, isDraft: Bool? = nil) -> Snapshot {
+                    Snapshot(
+                        version: version ?? self.version,
+                        title: title ?? self.title,
+                        isDraft: isDraft ?? self.isDraft
                     )
                 }
 
@@ -202,25 +252,11 @@ final class LensMacroExpansionTests: XCTestCase {
                     }
 
                     public var version: LensType.BoundLensValue<Snapshot, Int> {
-                        LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(
-                            get: {
-                                $0.version
-                            },
-                            set: { (newValue, whole) in
-                                whole.throughLens.changing(version: newValue)
-                            }
-                        ))
+                        LensType.BoundLensValue(instance: instance, lens: Lenses.version)
                     }
 
                     public var title: LensType.BoundLensValue<Snapshot, String?> {
-                        LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(
-                            get: {
-                                $0.title
-                            },
-                            set: { (newValue, whole) in
-                                whole.throughLens.changing(title: newValue)
-                            }
-                        ))
+                        LensType.BoundLensValue(instance: instance, lens: Lenses.title)
                     }
 
                     public func changing(version: Int? = nil, title: String? = nil, isDraft: Bool? = nil) -> Snapshot {
@@ -282,6 +318,13 @@ final class LensMacroExpansionTests: XCTestCase {
                     }
                 }
 
+                func changing(first: A? = nil, second: B? = nil) -> Pair<A, B> {
+                    Pair<A, B>(
+                        first: first ?? self.first,
+                        second: second ?? self.second
+                    )
+                }
+
                 @dynamicMemberLookup
                 struct ThroughLens {
                     let instance: Pair<A, B>
@@ -337,6 +380,12 @@ final class LensMacroExpansionTests: XCTestCase {
                             copy.name = newValue
                             return copy
                         }
+                    )
+                }
+
+                public func changing(name: String? = nil) -> User {
+                    User(
+                        name: name ?? self.name
                     )
                 }
 
@@ -463,6 +512,13 @@ final class LensMacroExpansionTests: XCTestCase {
                     )
                 }
 
+                func changing(label: String? = nil) -> Mixed {
+                    Mixed(
+                        count: self.count,
+                        label: label ?? self.label
+                    )
+                }
+
                 @dynamicMemberLookup
                 struct ThroughLens {
                     let instance: Mixed
@@ -538,6 +594,13 @@ final class LensMacroExpansionTests: XCTestCase {
                             copy.name = newValue
                             return copy
                         }
+                    )
+                }
+
+                func changing(email: String? = nil, name: String? = nil) -> Account {
+                    Account(
+                        email: email ?? self.email,
+                        name: name ?? self.name
                     )
                 }
 
@@ -652,6 +715,12 @@ final class LensMacroExpansionTests: XCTestCase {
                         )
                     }
 
+                    func changing(value: Int? = nil) -> Inner {
+                        Inner(
+                            value: value ?? self.value
+                        )
+                    }
+
                     @dynamicMemberLookup
                     struct ThroughLens {
                         let instance: Inner
@@ -705,6 +774,156 @@ final class LensMacroExpansionTests: XCTestCase {
                     column: 1
                 )
             ],
+            macros: testMacros
+        )
+    }
+    func testConstantWithInitialValueGetsNoLensWithWarning() throws {
+        assertMacroExpansion(
+            """
+            @Lens
+            struct Config {
+                let id: Int = 1
+                var name: String
+            }
+            """,
+            expandedSource: """
+            struct Config {
+                let id: Int = 1
+                var name: String
+
+                enum Lenses {
+                    static let name: LensType.LensValue<Config, String> = LensType.LensValue(
+                        get: {
+                            $0.name
+                        },
+                        set: { (newValue, whole) in
+                            var copy = whole
+                            copy.name = newValue
+                            return copy
+                        }
+                    )
+                }
+
+                func changing(name: String? = nil) -> Config {
+                    Config(
+                        name: name ?? self.name
+                    )
+                }
+
+                @dynamicMemberLookup
+                struct ThroughLens {
+                    let instance: Config
+
+                    func get() -> Config {
+                        instance
+                    }
+
+                    func set(_ newValue: Config) -> Config {
+                        newValue
+                    }
+
+                    subscript <Subpart>(dynamicMember keyPath: WritableKeyPath<Config, Subpart>) -> LensType.BoundLensValue<Config, Subpart> {
+                        LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(keyPath))
+                    }
+
+                    func changing(name: String? = nil) -> Config {
+                        self.set(Config(
+                            name: name ?? self.get().name
+                        ))
+                    }
+                }
+
+                var throughLens: ThroughLens {
+                    ThroughLens(instance: self)
+                }
+            }
+            """,
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "Lenses are not generated for 'id' because constants with initial values are not part of the memberwise initializer.",
+                    line: 3,
+                    column: 9,
+                    severity: .warning
+                )
+            ],
+            macros: testMacros
+        )
+    }
+
+    func testKeepsCustomChangingMethod() throws {
+        assertMacroExpansion(
+            """
+            @Lens
+            struct Point {
+                var x: Int
+                var y: Int
+
+                func changing(x: Int? = nil, y: Int? = nil) -> Point {
+                    Point(x: x ?? self.x, y: y ?? self.y)
+                }
+            }
+            """,
+            expandedSource: """
+            struct Point {
+                var x: Int
+                var y: Int
+
+                func changing(x: Int? = nil, y: Int? = nil) -> Point {
+                    Point(x: x ?? self.x, y: y ?? self.y)
+                }
+
+                enum Lenses {
+                    static let x: LensType.LensValue<Point, Int> = LensType.LensValue(
+                        get: {
+                            $0.x
+                        },
+                        set: { (newValue, whole) in
+                            var copy = whole
+                            copy.x = newValue
+                            return copy
+                        }
+                    )
+                    static let y: LensType.LensValue<Point, Int> = LensType.LensValue(
+                        get: {
+                            $0.y
+                        },
+                        set: { (newValue, whole) in
+                            var copy = whole
+                            copy.y = newValue
+                            return copy
+                        }
+                    )
+                }
+
+                @dynamicMemberLookup
+                struct ThroughLens {
+                    let instance: Point
+
+                    func get() -> Point {
+                        instance
+                    }
+
+                    func set(_ newValue: Point) -> Point {
+                        newValue
+                    }
+
+                    subscript <Subpart>(dynamicMember keyPath: WritableKeyPath<Point, Subpart>) -> LensType.BoundLensValue<Point, Subpart> {
+                        LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(keyPath))
+                    }
+
+                    func changing(x: Int? = nil, y: Int? = nil) -> Point {
+                        self.set(Point(
+                            x: x ?? self.get().x,
+                            y: y ?? self.get().y
+                        ))
+                    }
+                }
+
+                var throughLens: ThroughLens {
+                    ThroughLens(instance: self)
+                }
+            }
+            """,
             macros: testMacros
         )
     }

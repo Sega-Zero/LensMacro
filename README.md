@@ -45,6 +45,25 @@ let author3 = author.throughLens.changing(
 )
 ```
 
+Lenses also work for immutable data: `Lenses` entries for `let` properties
+rebuild the value through the memberwise initializer, so they compose like
+any other lens.
+
+```swift
+@Lens
+struct Snapshot {
+    let version: Int
+    var isDraft: Bool
+}
+
+let snapshot = Snapshot(version: 1, isDraft: false)
+
+Snapshot.Lenses.version.get(snapshot)       // 1
+Snapshot.Lenses.version.set(2, snapshot)    // Snapshot with version 2
+
+snapshot.throughLens.version.set(2)         // same, as a bound lens
+```
+
 ## What the macro generates
 
 ```swift
@@ -71,7 +90,15 @@ struct Person {
                 return copy
             }
         )
-        // ... one entry per stored `var` property
+        // ... one entry per stored property: `let` entries rebuild the
+        // value through the memberwise initializer instead of copying it
+    }
+
+    func changing(name: String? = nil, address: Address? = nil) -> Person {
+        Person(
+            name: name ?? self.name,
+            address: address ?? self.address
+        )
     }
 
     @dynamicMemberLookup
@@ -130,14 +157,14 @@ team.throughLens.lead.address.street.get()              // read deep
 team.throughLens.lead.address.street.set("Baker Street") // update deep
 ```
 
-Because chains are built from key paths, they can go through `var`
-properties of any type — chained types do not need to be annotated with
-`@Lens` themselves.
+Because chains are built from writable key paths, they only go through
+`var` properties. Chained types do not need to be annotated with `@Lens`
+themselves.
 
-Key paths are not writable for constants, so stored `let` properties get
-dedicated bound lenses on the struct's own `throughLens` instead. They
-rebuild the value through the memberwise initializer (like `changing`), so
-they work exactly like `var` chains:
+Key paths are not writable for constants, so `let` properties get dedicated
+support instead: an entry in `Lenses` and a bound lens on the struct's own
+`throughLens`. Both rebuild the value through the memberwise initializer
+(like `changing`), so they work like `var` chains:
 
 ```swift
 @Lens
@@ -146,24 +173,48 @@ struct Snapshot {
     var isDraft: Bool
 }
 
-snapshot.throughLens.version.get()   // read the version
-snapshot.throughLens.version.set(2)  // rebuilt snapshot with version 2
+snapshot.throughLens.version.get()        // read the version
+snapshot.throughLens.version.set(2)       // rebuilt snapshot with version 2
+Snapshot.Lenses.version.set(2, snapshot)  // same, as a composable lens
+```
+
+A dot-notation chain cannot continue *through* a `let` property, since
+deeper hops use writable key paths — but `Lenses` composition is not
+limited that way:
+
+```swift
+@Lens
+struct Label {
+    let text: String
+}
+
+@Lens
+struct Note {
+    let label: Label
+    var isPinned: Bool
+}
+
+let text = Note.Lenses.label.compose(Label.Lenses.text)
+text.set("hello", note)   // rebuilt note with new label text
 ```
 
 ## Changing several fields
 
 ```swift
-author.throughLens.changing(name: "narf")   // Person with name "narf"
-author.throughLens.changing(
+author.changing(name: "narf")               // Person with name "narf"
+author.throughLens.changing(name: "narf")   // same thing, bound
+author.changing(
     name: "narf",
     address: Address(street: "Baker Street")
 )
 ```
 
-`changing` rebuilds the value through the memberwise initializer, so unlike
-lenses it can replace stored `let` properties too — handy for settings and
-other immutable value types. The same ability backs the bound lenses for
-`let` properties described in "Bound lenses":
+`changing` is generated both directly on the value and on `throughLens`
+(the bound form keeps its result chainable). It rebuilds the value through
+the memberwise initializer, so unlike `var`-based lenses it can replace
+stored `let` properties too — handy for settings and other immutable value
+types. The same ability backs the rebuild-based lenses for `let`
+properties described in "Bound lenses":
 
 ```swift
 @Lens
@@ -172,31 +223,41 @@ struct Settings {
     var isEnabled: Bool
 }
 
-settings.throughLens.changing(version: 2)
+settings.changing(version: 2)
 ```
 
 Passing `nil` (or omitting a parameter) keeps the current value; an optional
-property cannot be set back to `nil` this way.
+property cannot be set back to `nil` this way. Lenses do not have this
+limitation: a rebuild-based `let` lens passes the new value straight
+through, so `Receipt.Lenses.memo.set(nil, receipt)` clears an optional
+constant.
 
-`changing` is not generated for structs with custom initializers or with
-properties that have attributes/property wrappers — both suppress the
-memberwise initializer it builds on — and such structs keep a plain
-`throughLens`. Like the rest of the dot notation, `changing` is only
-available on `throughLens` itself; once a chain focuses deeper
-(`team.throughLens.lead`), the result is a plain bound lens.
+`changing` (and rebuild-based `let` lenses) are not generated for structs
+with custom initializers or with properties that have
+attributes/property wrappers — both suppress the memberwise initializer
+they build on — and such structs keep a plain `throughLens`. Once a
+dot-notation chain focuses deeper (`team.throughLens.lead`), the result is
+a plain bound lens and `changing` is no longer available on it.
 
 ## Behavior and limitations
 
-- Only stored `var` properties with an explicit type annotation get an entry
-  in the `Lenses` enum and chain through key paths; `let` properties get
-  rebuild-based bound lenses on `throughLens` instead (whenever `changing`
-  is available — see "Bound lenses").
-- Computed properties, `static` members are skipped.
+- Every stored property with an explicit type annotation gets an entry in
+  the `Lenses` enum: `var` entries replace the field in a copy, `let`
+  entries rebuild the value through the memberwise initializer.
+- Dot-notation chains only go through `var` properties. `let` properties
+  are still reachable: use their `Lenses` entry (composition) or their
+  bound lens on the struct's own `throughLens`.
+- Rebuild-based lenses for `let` properties (and with them `changing`) are
+  only generated when a memberwise initializer is available: no custom
+  initializers and no properties with attributes or property wrappers.
+  Otherwise the struct keeps a plain `throughLens`.
+- A `let` property with an initial value is not part of the memberwise
+  initializer, so no lens can be generated for it — the macro says so with
+  a warning.
+- Computed properties and `static` members are skipped.
 - Properties with attributes or property wrappers are skipped with a
   warning (wrappers can change what get/set mean, so the macro stays out of
   the way).
-- `changing` is unavailable on structs with custom initializers or with
-  properties that have attributes — they keep a plain `throughLens`.
 - A property without an explicit type annotation gets a warning; add the
   annotation to get a lens for it.
 - Attaching `@Lens` to anything other than a struct is an error.
@@ -217,14 +278,16 @@ available on `throughLens` itself; once a chain focuses deeper
 | `BoundLens.get()` | read the part of the bound instance |
 | `BoundLens.set(_:)` | return the bound whole with the part replaced |
 | `BoundLensType` | protocol for custom bound lens types |
+| `Lenses` | generated on `@Lens` structs, one composable lens per stored property |
+| `.changing(...)` | generated on `@Lens` structs, replaces several fields in one call |
 | `throughLens` | generated on `@Lens` structs, starts a bound lens chain |
-| `ThroughLens.changing(...)` | generated on `@Lens` structs, replaces several fields in one call |
+| `ThroughLens.changing(...)` | bound version of `changing(...)`, keeps its result chainable |
 
 ## Requirements
 
 - Swift 6.4+ toolchain (tested with Xcode 27) — macros need a matching
   swift-syntax, which SwiftPM fetches automatically.
-- Platforms: macOS 10.15+, iOS 13+, tvOS 13+, watchOS 6+.
+- Platforms: macOS 12+, iOS 15+, tvOS 15+, watchOS 9+.
 
 ## Development
 

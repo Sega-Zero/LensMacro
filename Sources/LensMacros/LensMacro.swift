@@ -4,9 +4,14 @@ import SwiftSyntax
 import SwiftSyntaxMacros
 
 /// Implementation of the `@Lens` macro, which adds a nested `Lenses` enum
-/// with one `Lens` per stored `var` property of the annotated struct, and a
-/// `throughLens` entry point that starts a chain of bound lenses and can
-/// replace several fields at once with `changing`.
+/// with one `Lens` per stored property of the annotated struct, a `changing`
+/// method that replaces several fields at once, and a `throughLens` entry
+/// point that starts a chain of bound lenses.
+///
+/// Lenses for `var` properties replace the field in a copy of the value.
+/// Lenses for `let` properties, `changing`, and the bound lenses for
+/// constants rebuild the value through the memberwise initializer, so they
+/// are only generated when a memberwise initializer is available.
 ///
 /// The API is based on <https://github.com/narfdotpl/lenso>.
 public struct LensMacro: MemberMacro {
@@ -22,83 +27,102 @@ public struct LensMacro: MemberMacro {
 
         let rootType = rootTypeName(of: structDecl)
         let access = accessPrefix(of: structDecl)
+        let isGeneric = structDecl.genericParameterClause != nil
 
-        var lenses: [String] = []
+        let fields = collectFields(of: structDecl, in: context)
 
-        for member in structDecl.memberBlock.members {
-            guard let property = member.decl.as(VariableDeclSyntax.self),
-                  property.bindingSpecifier.tokenKind == .keyword(.var),
-                  !property.modifiers.contains(where: isStaticModifier)
-            else {
-                continue
-            }
+        // Rebuilding goes through the memberwise initializer, which exists
+        // only when the struct declares no initializers of its own and every
+        // stored property can appear in the generated call.
+        let rebuildFields = fields.filter { !$0.isLazy }
+        let fieldsAreCollectable = rebuildFields.allSatisfy { $0.name != nil }
+        let hasCustomInitializer = structDecl.memberBlock.members.contains {
+            $0.decl.is(InitializerDeclSyntax.self)
+        }
+        let wrappedField = rebuildFields.first { $0.hasAttributes }
 
-            let names = property.bindings.compactMap {
-                $0.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
-            }
-            let displayName = names.first.map { "'\($0)'" } ?? "this property"
-
-            guard property.attributes.isEmpty else {
+        if fieldsAreCollectable {
+            if hasCustomInitializer {
                 context.diagnose(
                     Diagnostic(
-                        node: property,
+                        node: structDecl,
                         message: LensMacroWarning(
-                            message: "Lenses are not generated for \(displayName) because it has attributes or a property wrapper."
+                            message: "changing is not generated for '\(structDecl.name.text)' because a custom initializer suppresses the memberwise initializer it rebuilds values with."
                         )
                     )
                 )
-                continue
-            }
-
-            for binding in property.bindings {
-                // Computed and observed properties are not lenses.
-                guard binding.accessorBlock == nil else { continue }
-
-                guard let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
-                else { continue }
-
-                guard let typeAnnotation = binding.typeAnnotation else {
-                    context.diagnose(
-                        Diagnostic(
-                            node: binding,
-                            message: LensMacroWarning(
-                                message: "Lenses require an explicit type annotation, so no lens was generated for '\(identifier)'."
-                            )
+            } else if let wrappedField {
+                context.diagnose(
+                    Diagnostic(
+                        node: structDecl,
+                        message: LensMacroWarning(
+                            message: "changing is not generated for '\(structDecl.name.text)' because '\(wrappedField.name ?? "a property")' has attributes or a property wrapper."
                         )
-                    )
-                    continue
-                }
-
-                lenses.append(
-                    lensDeclaration(
-                        access: access,
-                        rootType: rootType,
-                        name: identifier,
-                        type: typeAnnotation.type.trimmedDescription,
-                        isGeneric: structDecl.genericParameterClause != nil
                     )
                 )
             }
         }
 
+        let canRebuild = fieldsAreCollectable && !hasCustomInitializer && wrappedField == nil
+        let canChange = rebuildFields.contains { $0.isMemberwiseParameter && $0.type != nil }
+        let declaresChanging = structDecl.memberBlock.members.contains { member in
+            if let function = member.decl.as(FunctionDeclSyntax.self) {
+                return function.name.text == "changing"
+            }
+            if let property = member.decl.as(VariableDeclSyntax.self) {
+                return property.bindings.contains {
+                    $0.pattern.as(IdentifierPatternSyntax.self)?.identifier.text == "changing"
+                }
+            }
+            return false
+        }
+
         var members: [DeclSyntax] = []
 
-        if !lenses.isEmpty {
+        var lensEntries: [String] = []
+        for field in fields where !field.hasAttributes {
+            guard let name = field.name, let type = field.type else { continue }
+
+            if field.isMutable {
+                lensEntries.append(
+                    variableLensDeclaration(
+                        access: access,
+                        rootType: rootType,
+                        isGeneric: isGeneric,
+                        name: name,
+                        type: type
+                    )
+                )
+            } else if !field.hasInitializer, canRebuild {
+                lensEntries.append(
+                    rebuildLensDeclaration(
+                        access: access,
+                        rootType: rootType,
+                        isGeneric: isGeneric,
+                        name: name,
+                        type: type,
+                        arguments: rebuildArguments(of: rebuildFields, replacing: name)
+                    )
+                )
+            }
+        }
+
+        if !lensEntries.isEmpty {
             let enumDecl: DeclSyntax = """
             \(raw: access)enum Lenses {
-            \(raw: lenses.joined(separator: "\n"))
+            \(raw: lensEntries.joined(separator: "\n"))
             }
             """
             members.append(enumDecl)
         }
 
-        if let wrapper = changingWrapperDeclaration(
-            of: structDecl,
-            rootType: rootType,
-            access: access,
-            in: context
-        ) {
-            let wrapperDecl: DeclSyntax = "\(raw: wrapper)"
+        if canRebuild, canChange {
+            if !declaresChanging {
+                let changingDecl: DeclSyntax = "\(raw: changingDeclaration(access: access, rootType: rootType, fields: rebuildFields))"
+                members.append(changingDecl)
+            }
+
+            let wrapperDecl: DeclSyntax = "\(raw: throughLensStructDeclaration(access: access, rootType: rootType, fields: rebuildFields))"
             members.append(wrapperDecl)
 
             let throughLensDecl: DeclSyntax = "\(raw: throughLensWrapperDeclaration(access: access))"
@@ -111,129 +135,173 @@ public struct LensMacro: MemberMacro {
         return members
     }
 
-    // MARK: - changing
+    // MARK: - Collecting properties
 
-    private struct ChangingField {
-        let name: String
+    /// A stored property of the annotated struct, used to build both the
+    /// `Lenses` entries and the memberwise initializer calls that rebuild
+    /// values.
+    private struct Field {
+        let name: String?
         let type: String?
         let isOptional: Bool
-        let hasAttributes: Bool
         let isMutable: Bool
+        let hasAttributes: Bool
+        let isLazy: Bool
+        let hasInitializer: Bool
+
+        /// `true` when the property is a memberwise initializer parameter, so
+        /// a rebuilt value can pass it through.
+        var isMemberwiseParameter: Bool {
+            !hasAttributes && (isMutable || !hasInitializer)
+        }
     }
 
-    /// Builds the `ThroughLens` wrapper that `throughLens` returns, whose
-    /// `changing` method replaces several fields of the annotated struct in
-    /// one call:
-    ///
-    /// ```swift
-    /// author.throughLens.changing(name: "narf", address: newAddress)
-    /// ```
-    ///
-    /// Rebuilding values goes through the memberwise initializer, so the
-    /// wrapper is skipped for structs with custom initializers or with
-    /// properties that have attributes.
-    private static func changingWrapperDeclaration(
+    private static func collectFields(
         of structDecl: StructDeclSyntax,
-        rootType: String,
-        access: String,
         in context: some MacroExpansionContext
-    ) -> String? {
-        let name = structDecl.name.text
+    ) -> [Field] {
+        var fields: [Field] = []
 
-        guard let fields = changingFields(of: structDecl) else {
-            return nil
-        }
-
-        if structDecl.memberBlock.members.contains(where: { $0.decl.is(InitializerDeclSyntax.self) }) {
-            context.diagnose(
-                Diagnostic(
-                    node: structDecl,
-                    message: LensMacroWarning(
-                        message: "changing is not generated for '\(name)' because a custom initializer suppresses the memberwise initializer it rebuilds values with."
-                    )
-                )
-            )
-            return nil
-        }
-
-        if let wrapped = fields.first(where: { $0.hasAttributes }) {
-            context.diagnose(
-                Diagnostic(
-                    node: structDecl,
-                    message: LensMacroWarning(
-                        message: "changing is not generated for '\(name)' because '\(wrapped.name)' has attributes or a property wrapper."
-                    )
-                )
-            )
-            return nil
-        }
-
-        guard fields.contains(where: { $0.type != nil }) else {
-            return nil
-        }
-
-        return changingWrapper(access: access, rootType: rootType, fields: fields)
-    }
-
-    /// Collects the stored properties a rebuilt value is assembled from.
-    /// Returns `nil` when a member is something the generated initializer
-    /// call cannot handle.
-    private static func changingFields(of structDecl: StructDeclSyntax) -> [ChangingField]? {
-        var fields: [ChangingField] = []
         for member in structDecl.memberBlock.members {
             guard let property = member.decl.as(VariableDeclSyntax.self),
-                  !property.modifiers.contains(where: isStaticModifier),
-                  !property.modifiers.contains(where: isLazyModifier)
+                  !property.modifiers.contains(where: isStaticModifier)
             else {
                 continue
             }
+
+            let hasAttributes = !property.attributes.isEmpty
+            let isLazy = property.modifiers.contains(where: isLazyModifier)
             let isMutable = property.bindingSpecifier.tokenKind == .keyword(.var)
+
+            if hasAttributes {
+                let names = property.bindings.compactMap {
+                    $0.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
+                }
+                let displayName = names.first.map { "'\($0)'" } ?? "this property"
+                context.diagnose(
+                    Diagnostic(
+                        node: property,
+                        message: LensMacroWarning(
+                            message: "Lenses are not generated for \(displayName) because it has attributes or a property wrapper."
+                        )
+                    )
+                )
+            }
+
             for binding in property.bindings {
                 // Getter/setter accessor blocks describe computed properties,
-                // while `willSet`/`didSet` observers keep a stored property.
+                // which are not stored, so there is nothing to focus on.
                 if let accessors = binding.accessorBlock, isComputed(accessors) {
                     continue
                 }
-                guard let identifier = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
-                else {
-                    return nil
+
+                let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text
+                let hasInitializer = binding.initializer != nil
+
+                if !hasAttributes {
+                    if !isMutable, hasInitializer {
+                        if let name {
+                            context.diagnose(
+                                Diagnostic(
+                                    node: binding,
+                                    message: LensMacroWarning(
+                                        message: "Lenses are not generated for '\(name)' because constants with initial values are not part of the memberwise initializer."
+                                    )
+                                )
+                            )
+                        }
+                    } else if binding.typeAnnotation == nil, let name {
+                        context.diagnose(
+                            Diagnostic(
+                                node: binding,
+                                message: LensMacroWarning(
+                                    message: "Lenses require an explicit type annotation, so no lens was generated for '\(name)'."
+                                )
+                            )
+                        )
+                    }
                 }
+
                 fields.append(
-                    ChangingField(
-                        name: identifier,
+                    Field(
+                        name: name,
                         type: binding.typeAnnotation?.type.trimmedDescription,
                         isOptional: binding.typeAnnotation.map { isOptionalType($0.type) } ?? false,
-                        hasAttributes: !property.attributes.isEmpty,
-                        isMutable: isMutable
+                        isMutable: isMutable,
+                        hasAttributes: hasAttributes,
+                        isLazy: isLazy,
+                        hasInitializer: hasInitializer
                     )
                 )
             }
         }
+
         return fields
     }
 
-    private static func changingWrapper(
+    // MARK: - changing
+
+    private static func changingParameters(of fields: [Field]) -> [String] {
+        fields.compactMap { field in
+            guard field.isMemberwiseParameter, let name = field.name, let type = field.type else {
+                return nil
+            }
+            return "\(name): \(type)\(field.isOptional ? "" : "?") = nil"
+        }
+    }
+
+    private static func changingArguments(of fields: [Field], whole: String) -> [String] {
+        fields.compactMap { field in
+            guard field.isMemberwiseParameter, let name = field.name else { return nil }
+            guard field.type != nil else { return "\(name): \(whole).\(name)" }
+            return "\(name): \(name) ?? \(whole).\(name)"
+        }
+    }
+
+    /// Arguments that rebuild the whole value, replacing `replacement` with
+    /// `newValue` and passing every other memberwise parameter through.
+    private static func rebuildArguments(of fields: [Field], replacing replacement: String) -> [String] {
+        fields.compactMap { field in
+            guard field.isMemberwiseParameter, let name = field.name else { return nil }
+            guard name != replacement else { return "\(name): newValue" }
+            return "\(name): whole.\(name)"
+        }
+    }
+
+    private static func changingDeclaration(
         access: String,
         rootType: String,
-        fields: [ChangingField]
+        fields: [Field]
     ) -> String {
-        let parameters = fields.compactMap { field -> String? in
-            guard let type = field.type else { return nil }
-            return "\(field.name): \(type)\(field.isOptional ? "" : "?") = nil"
+        let parameters = changingParameters(of: fields).joined(separator: ", ")
+        let arguments = changingArguments(of: fields, whole: "self").joined(separator: ",\n        ")
+        return """
+        \(access)func changing(\(parameters)) -> \(rootType) {
+            \(rootType)(
+                \(arguments)
+            )
         }
-        let arguments = fields.map { field -> String in
-            guard field.type != nil else {
-                return "\(field.name): self.get().\(field.name)"
+        """
+    }
+
+    private static func throughLensStructDeclaration(
+        access: String,
+        rootType: String,
+        fields: [Field]
+    ) -> String {
+        let parameters = changingParameters(of: fields).joined(separator: ", ")
+        let arguments = changingArguments(of: fields, whole: "self.get()").joined(separator: ",\n            ")
+        let constantLenses = fields.compactMap { field -> String? in
+            guard !field.isMutable, !field.hasInitializer,
+                  let name = field.name, let type = field.type
+            else {
+                return nil
             }
-            return "\(field.name): \(field.name) ?? self.get().\(field.name)"
+            return constantBoundLens(access: access, rootType: rootType, name: name, type: type)
         }
-        let letLenses = fields.compactMap { field -> String? in
-            guard field.type != nil, !field.isMutable else { return nil }
-            return letFieldLens(field: field, rootType: rootType, access: access)
-        }
-        let letLensesSection = letLenses.isEmpty
+        let constantLensesSection = constantLenses.isEmpty
             ? ""
-            : "\n\(letLenses.joined(separator: "\n\n"))\n"
+            : "\n\(constantLenses.joined(separator: "\n\n"))\n"
         return """
         @dynamicMemberLookup
         \(access)struct ThroughLens {
@@ -250,34 +318,27 @@ public struct LensMacro: MemberMacro {
             \(access)subscript<Subpart>(dynamicMember keyPath: WritableKeyPath<\(rootType), Subpart>) -> LensType.BoundLensValue<\(rootType), Subpart> {
                 LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(keyPath))
             }
-        \(letLensesSection)
-            \(access)func changing(\(parameters.joined(separator: ", "))) -> \(rootType) {
+        \(constantLensesSection)
+            \(access)func changing(\(parameters)) -> \(rootType) {
                 self.set(\(rootType)(
-                    \(arguments.joined(separator: ",\n            "))
+                    \(arguments)
                 ))
             }
         }
         """
     }
 
-    /// A bound lens for a stored `let` property. Key paths are not writable
-    /// for constants, so the lens rebuilds the value through `changing`
-    /// instead of mutating a copy.
-    private static func letFieldLens(
-        field: ChangingField,
+    /// A bound lens for a stored `let` property. It delegates to the rebuild
+    /// lens of the nested `Lenses` enum.
+    private static func constantBoundLens(
+        access: String,
         rootType: String,
-        access: String
+        name: String,
+        type: String
     ) -> String {
         """
-            \(access)var \(field.name): LensType.BoundLensValue<\(rootType), \(field.type ?? "")> {
-                LensType.BoundLensValue(instance: instance, lens: LensType.LensValue(
-                    get: {
-                        $0.\(field.name)
-                    },
-                    set: { (newValue, whole) in
-                        whole.throughLens.changing(\(field.name): newValue)
-                    }
-                ))
+            \(access)var \(name): LensType.BoundLensValue<\(rootType), \(type)> {
+                LensType.BoundLensValue(instance: instance, lens: Lenses.\(name))
             }
         """
     }
@@ -290,12 +351,14 @@ public struct LensMacro: MemberMacro {
         """
     }
 
-    private static func lensDeclaration(
+    // MARK: - Lenses
+
+    private static func variableLensDeclaration(
         access: String,
         rootType: String,
+        isGeneric: Bool,
         name: String,
-        type: String,
-        isGeneric: Bool
+        type: String
     ) -> String {
         if isGeneric {
             // Swift does not support static stored properties in generic
@@ -303,7 +366,9 @@ public struct LensMacro: MemberMacro {
             return """
             \(access)static var \(name): LensType.LensValue<\(rootType), \(type)> {
                 LensType.LensValue(
-                    get: { $0.\(name) },
+                    get: {
+                        $0.\(name)
+                    },
                     set: { (newValue, whole) in
                         var copy = whole
                         copy.\(name) = newValue
@@ -315,11 +380,54 @@ public struct LensMacro: MemberMacro {
         }
         return """
         \(access)static let \(name): LensType.LensValue<\(rootType), \(type)> = LensType.LensValue(
-            get: { $0.\(name) },
+            get: {
+                $0.\(name)
+            },
             set: { (newValue, whole) in
                 var copy = whole
                 copy.\(name) = newValue
                 return copy
+            }
+        )
+        """
+    }
+
+    /// A lens for a stored `let` property. Key paths are not writable for
+    /// constants, so the setter rebuilds the value through the memberwise
+    /// initializer.
+    private static func rebuildLensDeclaration(
+        access: String,
+        rootType: String,
+        isGeneric: Bool,
+        name: String,
+        type: String,
+        arguments: [String]
+    ) -> String {
+        if isGeneric {
+            return """
+            \(access)static var \(name): LensType.LensValue<\(rootType), \(type)> {
+                LensType.LensValue(
+                    get: {
+                        $0.\(name)
+                    },
+                    set: { (newValue, whole) in
+                        \(rootType)(
+                            \(arguments.joined(separator: ",\n                "))
+                        )
+                    }
+                )
+            }
+            """
+        }
+        return """
+        \(access)static let \(name): LensType.LensValue<\(rootType), \(type)> = LensType.LensValue(
+            get: {
+                $0.\(name)
+            },
+            set: { (newValue, whole) in
+                \(rootType)(
+                    \(arguments.joined(separator: ",\n            "))
+                )
             }
         )
         """
@@ -332,6 +440,8 @@ public struct LensMacro: MemberMacro {
         }
         """
     }
+
+    // MARK: - Helpers
 
     private static func rootTypeName(of structDecl: StructDeclSyntax) -> String {
         let name = structDecl.name.text
